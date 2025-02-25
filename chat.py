@@ -7,20 +7,113 @@ from xmlrpc.server import SimpleXMLRPCServer
 import xmlrpc.client
 import socket
 from datetime import datetime
+import tkinter as tk
+from tkinter import ttk
 
 BROKER = "test.mosquitto.org"
 DISTANCIA_LIMITE = 200  # metros
-TOPICO_GERAL = "users/online"  # Tópico onde todos publicam suas informações
+TOPICO_GERAL = "users/onlinee"  # Tópico onde todos publicam suas informações
 TOPICO_MENSAGENS = "messages"  # Base para mensagens pendentes
+TOPICO_RECEBE = "recebe"
 
 class ClienteChat:
-    def __init__(self, username, latitude, longitude, porta_rpc):
-        self.username = username
-        self.localizacao = np.array([latitude, longitude])
-        self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
-        self.porta_rpc = int(porta_rpc)
-        self.mensagens_acumuladas = {}  # {destinatario: "timestamp | msg1\n timestamp | msg2\n ..."}
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Chat de Proximidade")
+        self.root.geometry("600x800")
 
+        self.username = tk.StringVar()
+        self.latitude = tk.DoubleVar()
+        self.longitude = tk.DoubleVar()
+        self.porta_rpc = tk.IntVar(value=8000)  
+        # self.localizacao = np.array([self.latitude.get(), self.longitude.get()])
+        self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
+        # self.porta_rpc = 8000 + np.random.randint(100)
+        self.mensagens_acumuladas = {}  # {destinatario: "timestamp | msg1\n timestamp | msg2\n ..."}
+        self.mensagens = []  # Histórico de mensagens
+        self.ip_local = tk.StringVar(value=obter_ip_local())
+
+        # Interface Gráfica
+        self.criar_interface()
+    
+    def criar_interface(self):
+        """Cria a interface gráfica."""
+        frame_top = tk.Frame(self.root, padx=10, pady=10)
+        frame_top.pack(fill="x")
+
+        tk.Label(frame_top, text="Nome:", font=("Arial", 10)).grid(row=0, column=0)
+        self.entry_username = tk.Entry(frame_top, textvariable=self.username)
+        self.entry_username.grid(row=0, column=1)
+
+        tk.Label(frame_top, text="IP:", font=("Arial", 10)).grid(row=1, column=0)
+        self.entry_ip = tk.Entry(frame_top, textvariable=self.ip_local)
+        self.entry_ip.grid(row=1, column=1)
+        self.entry_ip.config(state='disabled')
+
+        tk.Label(frame_top, text="Porta RPC:", font=("Arial", 10)).grid(row=2, column=0)
+        self.entry_porta = tk.Entry(frame_top, textvariable=self.porta_rpc)
+        self.entry_porta.grid(row=2, column=1)
+
+        tk.Label(frame_top, text="Latitude:", font=("Arial", 10)).grid(row=3, column=0)
+        tk.Entry(frame_top, textvariable=self.latitude).grid(row=3, column=1)
+
+        tk.Label(frame_top, text="Longitude:", font=("Arial", 10)).grid(row=4, column=0)
+        tk.Entry(frame_top, textvariable=self.longitude).grid(row=4, column=1)
+
+        self.botao_iniciar = tk.Button(frame_top, text="Iniciar", command=self.iniciar_ou_editar)
+        self.botao_iniciar.grid(row=5, column=1)
+
+        frame_mid = tk.Frame(self.root, padx=10, pady=10)
+        frame_mid.pack(fill="x")
+
+        tk.Label(frame_mid, text="Usuários Próximos:", font=("Arial", 10)).pack(anchor="w")
+        self.combobox_usuarios = ttk.Combobox(frame_mid, state="readonly", width=50)
+        self.combobox_usuarios.pack(pady=5, anchor="w")
+
+        tk.Label(frame_mid, text="Mensagem:", font=("Arial", 10)).pack(anchor="w")
+        self.entry_msg = tk.Entry(frame_mid, width=50)
+        self.entry_msg.pack(pady=5, anchor="w")
+
+        tk.Button(frame_mid, text="Enviar", command=self.enviar_mensagem_gui).pack(anchor="w")
+
+        frame_bottom = tk.Frame(self.root, padx=10, pady=10)
+        frame_bottom.pack(fill="both", expand=True)
+
+        tk.Label(frame_bottom, text="Histórico do Chat:", font=("Arial", 10)).pack(anchor="w")
+
+        self.text_chat = tk.Text(frame_bottom, height=10, width=70, wrap="word")
+        self.text_chat.pack(fill="both", expand=True, pady=5)
+        # Estilização das mensagens enviadas (verde, alinhada à direita)
+        self.text_chat.tag_config("SENT", foreground="green", justify="right")
+        self.text_chat.tag_config("PENDING", foreground="yellow", justify="right")
+
+        # Estilização das mensagens recebidas (preto, alinhada à esquerda - padrão)
+        self.text_chat.tag_config("RECEIVED", foreground="white", justify="left")
+        self.text_chat.tag_config("MOM", foreground="yellow", justify="left")
+
+        scrollbar = ttk.Scrollbar(frame_bottom, command=self.text_chat.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.text_chat.config(yscrollcommand=scrollbar.set)
+
+        tk.Button(self.root, text="Refresh", command=self.monitorar_vizinhos).pack(pady=5)
+
+    def iniciar_ou_editar(self):
+        # Verifica se o botão foi clicado pela primeira vez (Iniciar)
+        if self.botao_iniciar['text'] == "Iniciar":
+            # Desativa os campos Nome, IP e Porta
+            self.entry_username.config(state='disabled')
+            self.entry_ip.config(state='disabled')
+            self.entry_porta.config(state='disabled')
+            
+            # Altera o nome do botão para "Editar"
+            self.botao_iniciar.config(text="Editar")
+
+            self.iniciar()
+        else:
+            # Caso seja a opção "Editar", chama a função para publicar a localização
+            self.publicar_localizacao()
+    
+    def iniciar(self):
         # Conectar ao broker MQTT
         self.client = mqtt.Client()
         self.client.on_message = self.on_message
@@ -28,22 +121,36 @@ class ClienteChat:
 
         # Assinar tópicos
         self.client.subscribe(TOPICO_GERAL)
-        self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Mensagens pendentes
+        self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username.get()}")  # Mensagens pendentes
+        self.client.subscribe(f"{self.username.get()}/{TOPICO_RECEBE}")
         self.client.loop_start()
 
         self.publicar_localizacao()
         threading.Thread(target=self.iniciar_servidor_rpc, daemon=True).start()
-        threading.Thread(target=self.monitorar_vizinhos, daemon=True).start()
+        threading.Thread(target=self.refresh_a_cada_2min, daemon=True).start()
 
     def iniciar_servidor_rpc(self):
-        servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc), allow_none=True)
+        servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc.get()), allow_none=True)
         servidor.register_function(self.receber_mensagem, "receber_mensagem")
-        print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc}")
+        print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc.get()}")
         servidor.serve_forever()
 
-    def receber_mensagem(self, remetente, mensagem, timestamp):
-        """Recebe mensagens enviadas via RPC e sempre inclui o timestamp."""
-        print(f"\n📩 {timestamp} - Nova mensagem de {remetente}: {mensagem}")
+    def receber_mensagem(self, usuario, mensagem, timestamp, tipo=None):
+        """Recebe mensagens via XML-RPC e as exibe no chat."""
+        if tipo == "RECEIVED":
+            msg_formatada = f"{timestamp} - [RECEIVED] - {usuario}: {mensagem}"
+        elif tipo == "SENT":
+            msg_formatada = f"{mensagem} :{usuario} - [SENT] - {timestamp}"
+        elif tipo == "PENDING":
+            msg_formatada = f"{mensagem} :{usuario} - [PENDING] - {timestamp}"
+        elif tipo == "MOM":
+             msg_formatada = f"{timestamp} - [MOM] - {usuario}: {mensagem}"
+        else:
+            msg_formatada = f"{timestamp} - [INFO]: {mensagem}"
+
+        if msg_formatada not in self.mensagens:
+            self.mensagens.append(msg_formatada)
+        self.atualizar_chat()
         return True
 
     def enviar_mensagem(self, destinatario, mensagem):
@@ -56,11 +163,12 @@ class ClienteChat:
             if distancia <= DISTANCIA_LIMITE:
                 ip_destino = self.usuarios[destinatario][2]
                 porta_destino = self.usuarios[destinatario][3]
-
                 try:
                     proxy = xmlrpc.client.ServerProxy(f"http://{ip_destino}:{porta_destino}/")
-                    proxy.receber_mensagem(self.username, mensagem, timestamp)
+                    proxy.receber_mensagem(self.username.get(), mensagem, timestamp, "RECEIVED")
                     print(f"✅ {timestamp} - Mensagem enviada para {destinatario}: {mensagem}")
+
+                    self.receber_mensagem(destinatario, mensagem, timestamp, "SENT")
                 except Exception as e:
                     print(f"⚠️ {timestamp} - Erro ao enviar mensagem para {destinatario}: {e}")
                     self.armazenar_mensagem_mom(destinatario, mensagem, timestamp)
@@ -70,8 +178,51 @@ class ClienteChat:
         else:
             print(f"⚠️ {timestamp} - Destinatário {destinatario} não encontrado!")
 
+    def enviar_mensagem_gui(self):
+        """Função chamada ao clicar no botão de Enviar."""
+        destinatario_selecionado = self.combobox_usuarios.get()
+
+        if not destinatario_selecionado:
+            print("⚠️ Nenhum destinatário selecionado!")
+            return
+
+        # Extrai apenas o nome do usuário (remove a parte " (100.00m)")
+        destinatario = destinatario_selecionado.split(" ")[0]
+
+        mensagem = self.entry_msg.get().strip()
+
+        if not mensagem:
+            print("⚠️ Mensagem vazia!")
+            return
+
+        # Chama a função original de envio de mensagens
+        self.enviar_mensagem(destinatario, mensagem)
+
+        # Limpa a caixa de texto após o envio
+        self.entry_msg.delete(0, tk.END)
+
+    def atualizar_chat(self):
+        """Atualiza a caixa de texto do chat, formatando as mensagens."""
+        self.text_chat.config(state=tk.NORMAL)  # Permite edição temporária
+        self.text_chat.delete(1.0, tk.END)  # Limpa a caixa de texto
+
+        for mensagem in self.mensagens:
+            if "[SENT]" in mensagem:  # Se for uma mensagem enviada (contém "→")
+                self.text_chat.insert(tk.END, mensagem + "\n", "SENT")
+            elif "[PENDING]" in mensagem:  # Se for uma mensagem enviada (contém "→")
+                self.text_chat.insert(tk.END, mensagem + "\n", "PENDING")
+            elif "[MOM]" in mensagem:  # Se for uma mensagem enviada (contém "→")
+                self.text_chat.insert(tk.END, mensagem + "\n", "MOM")
+            else:  # Se for uma mensagem recebida
+                self.text_chat.insert(tk.END, mensagem + "\n", "RECEIVED")
+
+        self.text_chat.config(state=tk.DISABLED)  # Bloqueia edição
+        self.text_chat.yview(tk.END)  # Rola para a última mensagem
+
     def armazenar_mensagem_mom(self, destinatario, mensagem, timestamp):
         """Recupera mensagens anteriores e acumula antes de publicar, incluindo timestamp."""
+        print("chamou armazenar msg mom")
+        print(self.mensagens_acumuladas)
         topico_mensagem = f"{TOPICO_MENSAGENS}/{destinatario}"
 
         # Nova mensagem formatada com timestamp
@@ -85,45 +236,58 @@ class ClienteChat:
         self.mensagens_acumuladas[destinatario] = mensagem_acumulada
 
         # Publica mensagem acumulada com retain=True
-        payload = json.dumps({"remetente": self.username, "mensagem": mensagem_acumulada})
+        payload = json.dumps({"remetente": self.username.get(), "mensagem": mensagem_acumulada})
         self.client.publish(topico_mensagem, payload, retain=True)
+        self.receber_mensagem(destinatario, mensagem, timestamp, "PENDING")
 
     def buscar_mensagens_pendentes(self):
         """Verifica mensagens pendentes quando o usuário volta para a área."""
-        self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Busca mensagens
-        time.sleep(2)  # Pequeno delay para garantir que mensagens cheguem
-        self.client.unsubscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Depois se desinscreve
+        self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username.get()}")  # Busca mensagens
+        time.sleep(5)  # Pequeno delay para garantir que mensagens cheguem
+        self.client.unsubscribe(f"{TOPICO_MENSAGENS}/{self.username.get()}")  # Depois se desinscreve
 
-    def publicar_localizacao(self):
+    def publicar_localizacao(self, topico = TOPICO_GERAL):
         """Publica localização e IP via MQTT com retain=True."""
         payload = json.dumps({
-            "username": self.username,
-            "latitude": self.localizacao[0],
-            "longitude": self.localizacao[1],
+            "username": self.username.get(),
+            "latitude": self.latitude.get(),
+            "longitude": self.longitude.get(),
             "ip": obter_ip_local(),
-            "port": self.porta_rpc
+            "port": self.porta_rpc.get()
         })
-        print(f"📤 Publicando localização no tópico geral: {payload}")
-        self.client.publish(TOPICO_GERAL, payload, retain=True)
+        print(f"📤 Publicando localização no tópico {topico}: {payload}")
+        self.client.publish(topico, payload)
+        # self.monitorar_vizinhos()
 
     def monitorar_vizinhos(self):
         """Atualiza vizinhos e verifica mensagens pendentes."""
+        print("\n🔄 Atualizando distâncias:")
+
+        for user, (lat, lon, ip, port) in self.usuarios.items():
+            distancia = self.distancia((lat, lon))
+            status = "✅ Dentro da zona" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona"
+            print(f"   - {user} ({ip}:{port}): {distancia:.2f}m ({status})")
+
+            # Se o usuário voltou para a zona, buscar mensagens pendentes
+            if distancia <= DISTANCIA_LIMITE:
+                print(f"📨 {user} está na área! Buscando mensagens pendentes...")
+                self.buscar_mensagens_pendentes()
+        self.atualizar_usuarios_combobox()
+    
+    def refresh_a_cada_2min(self):
         while True:
-            time.sleep(30)
-            print("\n🔄 Atualizando distâncias:")
-
-            for user, (lat, lon, ip, port) in self.usuarios.items():
-                distancia = self.distancia((lat, lon))
-                status = "✅ Dentro da zona" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona"
-                print(f"   - {user} ({ip}:{port}): {distancia:.2f}m ({status})")
-
-                # Se o usuário voltou para a zona, buscar mensagens pendentes
-                if distancia <= DISTANCIA_LIMITE:
-                    print(f"📨 {user} está na área! Buscando mensagens pendentes...")
-                    self.buscar_mensagens_pendentes()
+            time.sleep(120)
+            self.monitorar_vizinhos()
 
     def distancia(self, localizacao):
-        return np.linalg.norm(self.localizacao - np.array(localizacao)) * 111139
+        return np.linalg.norm(np.array([self.latitude.get(), self.longitude.get()]) - np.array(localizacao)) * 111139
+
+    def atualizar_usuarios_combobox(self):
+        """Atualiza a lista de usuários disponíveis no Combobox."""
+        lista_usuarios = [f"{user} ({self.distancia((lat, lon)):.2f}m)"
+                          for user, (lat, lon, _, _) in self.usuarios.items()]
+        
+        self.combobox_usuarios["values"] = lista_usuarios
 
     def on_message(self, client, userdata, msg):
         """Processa mensagens MQTT recebidas no tópico geral e nas mensagens acumuladas."""
@@ -141,15 +305,35 @@ class ClienteChat:
                     print(f"⚠️ Mensagem inválida: {payload}")
                     return
 
-                if username != self.username:
+                if username != self.username.get():
                     self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
                     print(f"✅ {username} foi adicionado!")
+                    self.publicar_localizacao(f"{username}/{TOPICO_RECEBE}")
+                    # self.publicar_localizacao()
 
-            elif msg.topic.startswith(f"{TOPICO_MENSAGENS}/{self.username}"):
+                self.monitorar_vizinhos()
+
+            elif msg.topic.startswith(f"{TOPICO_MENSAGENS}/{self.username.get()}"):
                 remetente = payload.get("remetente")
                 mensagem = payload.get("mensagem")
                 if remetente and mensagem:
-                    print(f"\n📩 (ENTREGUE) Mensagens de {remetente}:\n{mensagem}")
+                    msg = mensagem.split("|")
+                    self.receber_mensagem(remetente, msg[1].strip(), msg[0].strip(), "MOM")
+            elif msg.topic.startswith(f"{self.username.get()}/{TOPICO_RECEBE}"):
+                username = payload.get("username")
+                latitude = payload.get("latitude")
+                longitude = payload.get("longitude")
+                ip = payload.get("ip")
+                porta_rpc = payload.get("port")
+
+                if None in (username, latitude, longitude, ip, porta_rpc):
+                    print(f"⚠️ Mensagem inválida: {payload}")
+                    return
+
+                if username != self.username.get():
+                    self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
+                    print(f"✅ {username} foi adicionado!")
+                    self.monitorar_vizinhos()
 
         except Exception as e:
             print(f"Erro ao processar mensagem: {e}")
@@ -166,729 +350,6 @@ def obter_ip_local():
         return "127.0.0.1"
 
 if __name__ == "__main__":
-    username = input("Digite seu nome: ")
-    lat = float(input("Digite sua latitude: "))
-    lon = float(input("Digite sua longitude: "))
-    porta_rpc = input("Digite sua porta RPC: ")
-
-    cliente = ClienteChat(username, lat, lon, porta_rpc)
-
-    while True:
-        cmd = input("\n📨 Digite 'm' para enviar mensagem ou 'l' para atualizar localização: ")
-
-        if cmd == "m":
-            dest = input("Digite o destinatário: ")
-            msg = input("Digite a mensagem: ")
-            cliente.enviar_mensagem(dest, msg)
-
-        elif cmd == "l":
-            lat = float(input("Nova latitude: "))
-            lon = float(input("Nova longitude: "))
-            cliente.localizacao = np.array([lat, lon])
-            cliente.publicar_localizacao()
-            print("📍 Localização atualizada!")
-
-# import json
-# import time
-# import threading
-# import numpy as np
-# import paho.mqtt.client as mqtt
-# from xmlrpc.server import SimpleXMLRPCServer
-# import xmlrpc.client
-# import socket
-# from datetime import datetime
-
-# BROKER = "test.mosquitto.org"
-# DISTANCIA_LIMITE = 200  # metros
-# TOPICO_GERAL = "users/online"  # Tópico onde todos publicam suas informações
-# TOPICO_MENSAGENS = "messages"  # Base para mensagens pendentes
-
-# class ClienteChat:
-#     def __init__(self, username, latitude, longitude, porta_rpc):
-#         self.username = username
-#         self.localizacao = np.array([latitude, longitude])
-#         self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
-#         self.porta_rpc = int(porta_rpc)
-#         self.mensagens_acumuladas = {}  # {destinatario: "timestamp | msg1\n timestamp | msg2\n ..."}
-
-#         # Conectar ao broker MQTT
-#         self.client = mqtt.Client()
-#         self.client.on_message = self.on_message
-#         self.client.connect(BROKER)
-
-#         # Assinar tópicos
-#         self.client.subscribe(TOPICO_GERAL)
-#         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Mensagens pendentes
-#         self.client.loop_start()
-
-#         self.publicar_localizacao()
-#         threading.Thread(target=self.iniciar_servidor_rpc, daemon=True).start()
-#         threading.Thread(target=self.monitorar_vizinhos, daemon=True).start()
-
-#     def iniciar_servidor_rpc(self):
-#         servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc), allow_none=True)
-#         servidor.register_function(self.receber_mensagem, "receber_mensagem")
-#         print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc}")
-#         servidor.serve_forever()
-
-#     def receber_mensagem(self, remetente, mensagem):
-#         """Recebe mensagens enviadas via RPC."""
-#         print(f"\n📩 Nova mensagem de {remetente}: {mensagem}")
-#         return True
-
-#     def enviar_mensagem(self, destinatario, mensagem):
-#         """Envia mensagem via XML-RPC ou armazena no MQTT acumulando mensagens com timestamp."""
-#         if destinatario in self.usuarios:
-#             distancia = self.distancia(self.usuarios[destinatario][:2])
-
-#             if distancia <= DISTANCIA_LIMITE:
-#                 ip_destino = self.usuarios[destinatario][2]
-#                 porta_destino = self.usuarios[destinatario][3]
-
-#                 try:
-#                     proxy = xmlrpc.client.ServerProxy(f"http://{ip_destino}:{porta_destino}/")
-#                     proxy.receber_mensagem(self.username, mensagem)
-#                     print(f"✅ Mensagem enviada para {destinatario}: {mensagem}")
-#                 except Exception as e:
-#                     print(f"⚠️ Erro ao enviar mensagem para {destinatario}: {e}")
-#                     self.armazenar_mensagem_mom(destinatario, mensagem)
-#             else:
-#                 print(f"⚠️ {destinatario} está fora da zona de visão! Armazenando mensagem.")
-#                 self.armazenar_mensagem_mom(destinatario, mensagem)
-#         else:
-#             print(f"⚠️ Destinatário {destinatario} não encontrado!")
-
-#     def armazenar_mensagem_mom(self, destinatario, mensagem):
-#         """Recupera mensagens anteriores e acumula antes de publicar, incluindo timestamp."""
-#         topico_mensagem = f"{TOPICO_MENSAGENS}/{destinatario}"
-
-#         # Gerar timestamp
-#         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-#         nova_mensagem = f"{timestamp} | {mensagem}"
-
-#         # Se já houver mensagens acumuladas, recupera e concatena
-#         ultima_mensagem = self.mensagens_acumuladas.get(destinatario, "")
-#         mensagem_acumulada = f"{ultima_mensagem}\n{nova_mensagem}" if ultima_mensagem else nova_mensagem
-
-#         # Atualiza o cache local
-#         self.mensagens_acumuladas[destinatario] = mensagem_acumulada
-
-#         # Publica mensagem acumulada com retain=True
-#         payload = json.dumps({"remetente": self.username, "mensagem": mensagem_acumulada})
-#         self.client.publish(topico_mensagem, payload, retain=True)
-
-#     def buscar_mensagens_pendentes(self):
-#         """Verifica mensagens pendentes quando o usuário volta para a área."""
-#         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Busca mensagens
-#         time.sleep(2)  # Pequeno delay para garantir que mensagens cheguem
-#         self.client.unsubscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Depois se desinscreve
-
-#     def publicar_localizacao(self):
-#         """Publica localização e IP via MQTT com retain=True."""
-#         payload = json.dumps({
-#             "username": self.username,
-#             "latitude": self.localizacao[0],
-#             "longitude": self.localizacao[1],
-#             "ip": obter_ip_local(),
-#             "port": self.porta_rpc
-#         })
-#         print(f"📤 Publicando localização no tópico geral: {payload}")
-#         self.client.publish(TOPICO_GERAL, payload, retain=True)
-
-#     def monitorar_vizinhos(self):
-#         """Atualiza vizinhos e verifica mensagens pendentes."""
-#         while True:
-#             time.sleep(30)
-#             print("\n🔄 Atualizando distâncias:")
-
-#             for user, (lat, lon, ip, port) in self.usuarios.items():
-#                 distancia = self.distancia((lat, lon))
-#                 status = "✅ Dentro da zona" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona"
-#                 print(f"   - {user} ({ip}:{port}): {distancia:.2f}m ({status})")
-
-#                 # Se o usuário voltou para a zona, buscar mensagens pendentes
-#                 if distancia <= DISTANCIA_LIMITE:
-#                     print(f"📨 {user} está na área! Buscando mensagens pendentes...")
-#                     self.buscar_mensagens_pendentes()
-
-#     def distancia(self, localizacao):
-#         return np.linalg.norm(self.localizacao - np.array(localizacao)) * 111139
-
-#     def on_message(self, client, userdata, msg):
-#         """Processa mensagens MQTT recebidas no tópico geral e nas mensagens acumuladas."""
-#         try:
-#             payload = json.loads(msg.payload.decode())
-
-#             if msg.topic.startswith(TOPICO_GERAL):
-#                 username = payload.get("username")
-#                 latitude = payload.get("latitude")
-#                 longitude = payload.get("longitude")
-#                 ip = payload.get("ip")
-#                 porta_rpc = payload.get("port")
-
-#                 if None in (username, latitude, longitude, ip, porta_rpc):
-#                     print(f"⚠️ Mensagem inválida: {payload}")
-#                     return
-
-#                 if username != self.username:
-#                     self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
-#                     print(f"✅ {username} foi adicionado!")
-
-#             elif msg.topic.startswith(f"{TOPICO_MENSAGENS}/{self.username}"):
-#                 remetente = payload.get("remetente")
-#                 mensagem = payload.get("mensagem")
-#                 if remetente and mensagem:
-#                     print(f"\n📩 (ENTREGUE) Nova mensagem de {remetente}:\n{mensagem}")
-
-#         except Exception as e:
-#             print(f"Erro ao processar mensagem: {e}")
-
-# def obter_ip_local():
-#     """Obtém o IP local correto."""
-#     try:
-#         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-#         s.connect(("8.8.8.8", 80))
-#         ip_local = s.getsockname()[0]
-#         s.close()
-#         return ip_local
-#     except:
-#         return "127.0.0.1"
-
-# if __name__ == "__main__":
-#     username = input("Digite seu nome: ")
-#     lat = float(input("Digite sua latitude: "))
-#     lon = float(input("Digite sua longitude: "))
-#     porta_rpc = input("Digite sua porta RPC: ")
-
-#     cliente = ClienteChat(username, lat, lon, porta_rpc)
-
-#     while True:
-#         cmd = input("\n📨 Digite 'm' para enviar mensagem ou 'l' para atualizar localização: ")
-
-#         if cmd == "m":
-#             dest = input("Digite o destinatário: ")
-#             msg = input("Digite a mensagem: ")
-#             cliente.enviar_mensagem(dest, msg)
-
-#         elif cmd == "l":
-#             lat = float(input("Nova latitude: "))
-#             lon = float(input("Nova longitude: "))
-#             cliente.localizacao = np.array([lat, lon])
-#             cliente.publicar_localizacao()
-#             print("📍 Localização atualizada!")
-
-# # import json
-# # import time
-# # import threading
-# # import numpy as np
-# # import paho.mqtt.client as mqtt
-# # from xmlrpc.server import SimpleXMLRPCServer
-# # import xmlrpc.client
-# # import socket
-
-# # BROKER = "test.mosquitto.org"
-# # DISTANCIA_LIMITE = 200  # metros
-# # TOPICO_GERAL = "users/online"  # Tópico onde todos publicam suas informações
-# # TOPICO_MENSAGENS = "messages"  # Base para mensagens pendentes
-
-# # class ClienteChat:
-# #     def __init__(self, username, latitude, longitude, porta_rpc):
-# #         self.username = username
-# #         self.localizacao = np.array([latitude, longitude])
-# #         self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
-# #         self.porta_rpc = int(porta_rpc)
-# #         self.mensagens_acumuladas = {}  # {destinatario: "msg1 | msg2 | msg3"}
-
-# #         # Conectar ao broker MQTT
-# #         self.client = mqtt.Client()
-# #         self.client.on_message = self.on_message
-# #         self.client.connect(BROKER)
-
-# #         # Assinar tópicos
-# #         self.client.subscribe(TOPICO_GERAL)
-# #         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Mensagens pendentes
-# #         self.client.loop_start()
-
-# #         self.publicar_localizacao()
-# #         threading.Thread(target=self.iniciar_servidor_rpc, daemon=True).start()
-# #         threading.Thread(target=self.monitorar_vizinhos, daemon=True).start()
-
-# #     def iniciar_servidor_rpc(self):
-# #         servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc), allow_none=True)
-# #         servidor.register_function(self.receber_mensagem, "receber_mensagem")
-# #         print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc}")
-# #         servidor.serve_forever()
-
-# #     def receber_mensagem(self, remetente, mensagem):
-# #         """Recebe mensagens enviadas via RPC."""
-# #         print(f"\n📩 Nova mensagem de {remetente}: {mensagem}")
-# #         return True
-
-# #     def enviar_mensagem(self, destinatario, mensagem):
-# #         """Envia mensagem via XML-RPC ou armazena no MQTT acumulando mensagens."""
-# #         if destinatario in self.usuarios:
-# #             distancia = self.distancia(self.usuarios[destinatario][:2])
-
-# #             if distancia <= DISTANCIA_LIMITE:
-# #                 ip_destino = self.usuarios[destinatario][2]
-# #                 porta_destino = self.usuarios[destinatario][3]
-
-# #                 try:
-# #                     proxy = xmlrpc.client.ServerProxy(f"http://{ip_destino}:{porta_destino}/")
-# #                     proxy.receber_mensagem(self.username, mensagem)
-# #                     print(f"✅ Mensagem enviada para {destinatario}: {mensagem}")
-# #                 except Exception as e:
-# #                     print(f"⚠️ Erro ao enviar mensagem para {destinatario}: {e}")
-# #                     self.armazenar_mensagem_mom(destinatario, mensagem)
-# #             else:
-# #                 print(f"⚠️ {destinatario} está fora da zona de visão! Armazenando mensagem.")
-# #                 self.armazenar_mensagem_mom(destinatario, mensagem)
-# #         else:
-# #             print(f"⚠️ Destinatário {destinatario} não encontrado!")
-
-# #     def armazenar_mensagem_mom(self, destinatario, mensagem):
-# #         """Recupera mensagens anteriores e acumula antes de publicar."""
-# #         topico_mensagem = f"{TOPICO_MENSAGENS}/{destinatario}"
-
-# #         # Se já houver mensagens acumuladas, recupera
-# #         ultima_mensagem = self.mensagens_acumuladas.get(destinatario, "")
-# #         nova_mensagem = f"{ultima_mensagem} | {mensagem}" if ultima_mensagem else mensagem
-
-# #         # Atualiza o cache local
-# #         self.mensagens_acumuladas[destinatario] = nova_mensagem
-
-# #         # Publica mensagem acumulada com retain=True
-# #         payload = json.dumps({"remetente": self.username, "mensagem": nova_mensagem})
-# #         self.client.publish(topico_mensagem, payload, retain=True)
-
-# #     def buscar_mensagens_pendentes(self):
-# #         """Verifica mensagens pendentes quando o usuário volta para a área."""
-# #         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Busca mensagens
-# #         time.sleep(2)  # Pequeno delay para garantir que mensagens cheguem
-# #         self.client.unsubscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Depois se desinscreve
-
-# #     def publicar_localizacao(self):
-# #         """Publica localização e IP via MQTT com retain=True."""
-# #         payload = json.dumps({
-# #             "username": self.username,
-# #             "latitude": self.localizacao[0],
-# #             "longitude": self.localizacao[1],
-# #             "ip": obter_ip_local(),
-# #             "port": self.porta_rpc
-# #         })
-# #         print(f"📤 Publicando localização no tópico geral: {payload}")
-# #         self.client.publish(TOPICO_GERAL, payload, retain=True)
-
-# #     def monitorar_vizinhos(self):
-# #         """Atualiza vizinhos e verifica mensagens pendentes."""
-# #         while True:
-# #             time.sleep(30)
-# #             print("\n🔄 Atualizando distâncias:")
-
-# #             for user, (lat, lon, ip, port) in self.usuarios.items():
-# #                 distancia = self.distancia((lat, lon))
-# #                 status = "✅ Dentro da zona" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona"
-# #                 print(f"   - {user} ({ip}:{port}): {distancia:.2f}m ({status})")
-
-# #                 # Se o usuário voltou para a zona, buscar mensagens pendentes
-# #                 if distancia <= DISTANCIA_LIMITE:
-# #                     print(f"📨 {user} está na área! Buscando mensagens pendentes...")
-# #                     self.buscar_mensagens_pendentes()
-
-# #     def distancia(self, localizacao):
-# #         return np.linalg.norm(self.localizacao - np.array(localizacao)) * 111139
-
-# #     def on_message(self, client, userdata, msg):
-# #         """Processa mensagens MQTT recebidas no tópico geral e nas mensagens acumuladas."""
-# #         try:
-# #             payload = json.loads(msg.payload.decode())
-
-# #             if msg.topic.startswith(TOPICO_GERAL):
-# #                 username = payload.get("username")
-# #                 latitude = payload.get("latitude")
-# #                 longitude = payload.get("longitude")
-# #                 ip = payload.get("ip")
-# #                 porta_rpc = payload.get("port")
-
-# #                 if None in (username, latitude, longitude, ip, porta_rpc):
-# #                     print(f"⚠️ Mensagem inválida: {payload}")
-# #                     return
-
-# #                 if username != self.username:
-# #                     self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
-# #                     print(f"✅ {username} foi adicionado!")
-
-# #             elif msg.topic.startswith(f"{TOPICO_MENSAGENS}/{self.username}"):
-# #                 remetente = payload.get("remetente")
-# #                 mensagem = payload.get("mensagem")
-# #                 if remetente and mensagem:
-# #                     print(f"\n📩 (ENTREGUE) Nova mensagem de {remetente}: {mensagem}")
-
-# #         except Exception as e:
-# #             print(f"Erro ao processar mensagem: {e}")
-
-# # def obter_ip_local():
-# #     """Obtém o IP local correto."""
-# #     try:
-# #         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# #         s.connect(("8.8.8.8", 80))
-# #         ip_local = s.getsockname()[0]
-# #         s.close()
-# #         return ip_local
-# #     except:
-# #         return "127.0.0.1"
-
-# # if __name__ == "__main__":
-# #     username = input("Digite seu nome: ")
-# #     lat = float(input("Digite sua latitude: "))
-# #     lon = float(input("Digite sua longitude: "))
-# #     porta_rpc = input("Digite sua porta RPC: ")
-
-# #     cliente = ClienteChat(username, lat, lon, porta_rpc)
-
-# #     while True:
-# #         cmd = input("\n📨 Digite 'm' para enviar mensagem ou 'l' para atualizar localização: ")
-
-# #         if cmd == "m":
-# #             dest = input("Digite o destinatário: ")
-# #             msg = input("Digite a mensagem: ")
-# #             cliente.enviar_mensagem(dest, msg)
-
-# #         elif cmd == "l":
-# #             lat = float(input("Nova latitude: "))
-# #             lon = float(input("Nova longitude: "))
-# #             cliente.localizacao = np.array([lat, lon])
-# #             cliente.publicar_localizacao()
-# #             print("📍 Localização atualizada!")
-
-# # # import json
-# # # import time
-# # # import threading
-# # # import numpy as np
-# # # import paho.mqtt.client as mqtt
-# # # from xmlrpc.server import SimpleXMLRPCServer
-# # # import xmlrpc.client
-# # # import socket
-
-# # # BROKER = "test.mosquitto.org"
-# # # DISTANCIA_LIMITE = 200  # metros
-# # # TOPICO_GERAL = "users/online"  # Tópico onde todos publicam suas informações
-# # # TOPICO_MENSAGENS = "messages"  # Base para mensagens pendentes
-
-# # # class ClienteChat:
-# # #     def __init__(self, username, latitude, longitude, porta_rpc):
-# # #         self.username = username
-# # #         self.localizacao = np.array([latitude, longitude])
-# # #         self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
-# # #         self.porta_rpc = int(porta_rpc)
-
-# # #         # Conectar ao broker MQTT
-# # #         self.client = mqtt.Client()
-# # #         self.client.on_message = self.on_message
-# # #         self.client.connect(BROKER)
-
-# # #         # Assinar o tópico geral e o de mensagens pendentes do usuário
-# # #         self.client.subscribe(TOPICO_GERAL)
-# # #         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Assina mensagens pendentes
-# # #         self.client.loop_start()
-
-# # #         self.publicar_localizacao()  # Publica as informações para que todos saibam
-# # #         threading.Thread(target=self.iniciar_servidor_rpc, daemon=True).start()
-# # #         threading.Thread(target=self.monitorar_vizinhos, daemon=True).start()
-
-# # #     def iniciar_servidor_rpc(self):
-# # #         """Inicia um servidor XML-RPC para receber mensagens."""
-# # #         servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc), allow_none=True)
-# # #         servidor.register_function(self.receber_mensagem, "receber_mensagem")
-# # #         print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc}")
-# # #         servidor.serve_forever()
-
-# # #     def receber_mensagem(self, remetente, mensagem):
-# # #         """Recebe mensagens enviadas via RPC."""
-# # #         print(f"\n📩 Nova mensagem de {remetente}: {mensagem}")
-# # #         return True
-
-# # #     def enviar_mensagem(self, destinatario, mensagem):
-# # #         """Envia uma mensagem via XML-RPC ou armazena em MQTT (fila MOM) se o usuário estiver fora da área."""
-# # #         if destinatario in self.usuarios:
-# # #             distancia = self.distancia(self.usuarios[destinatario][:2])
-
-# # #             if distancia <= DISTANCIA_LIMITE:
-# # #                 ip_destino = self.usuarios[destinatario][2]
-# # #                 porta_destino = self.usuarios[destinatario][3]
-
-# # #                 try:
-# # #                     proxy = xmlrpc.client.ServerProxy(f"http://{ip_destino}:{porta_destino}/")
-# # #                     proxy.receber_mensagem(self.username, mensagem)
-# # #                     print(f"✅ Mensagem enviada para {destinatario}: {mensagem}")
-
-# # #                 except Exception as e:
-# # #                     print(f"⚠️ Erro ao enviar mensagem para {destinatario}: {e}")
-# # #                     self.armazenar_mensagem_mom(destinatario, mensagem)
-# # #             else:
-# # #                 print(f"⚠️ {destinatario} está fora da zona de visão! Armazenando mensagem na fila MOM.")
-# # #                 self.armazenar_mensagem_mom(destinatario, mensagem)
-# # #         else:
-# # #             print(f"⚠️ Destinatário {destinatario} não encontrado!")
-
-# # #     def armazenar_mensagem_mom(self, destinatario, mensagem):
-# # #         """Armazena mensagens pendentes no MQTT (fila MOM) usando retain=True."""
-# # #         payload = json.dumps({"remetente": self.username, "mensagem": mensagem})
-# # #         self.client.publish(f"{TOPICO_MENSAGENS}/{destinatario}", payload, retain=True)
-
-# # #     def buscar_mensagens_pendentes(self):
-# # #         """Tenta recuperar mensagens pendentes do MQTT assim que o usuário volta para a zona de 200m."""
-# # #         self.client.subscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Se inscreve para buscar mensagens pendentes
-# # #         time.sleep(2)  # Pequeno delay para garantir que mensagens pendentes cheguem
-# # #         self.client.unsubscribe(f"{TOPICO_MENSAGENS}/{self.username}")  # Se desinscreve após buscar
-
-# # #     def publicar_localizacao(self):
-# # #         """Publica a localização e IP via MQTT no tópico geral, com retain=True."""
-# # #         payload = json.dumps({
-# # #             "username": self.username,
-# # #             "latitude": self.localizacao[0],
-# # #             "longitude": self.localizacao[1],
-# # #             "ip": obter_ip_local(),
-# # #             "port": self.porta_rpc
-# # #         })
-# # #         print(f"📤 Publicando localização no tópico geral: {payload}")
-# # #         self.client.publish(TOPICO_GERAL, payload, retain=True)
-
-# # #     def monitorar_vizinhos(self):
-# # #         """Verifica se algum usuário voltou para a área e entrega mensagens pendentes."""
-# # #         while True:
-# # #             time.sleep(30)
-# # #             print("\n🔄 Atualizando distâncias dos usuários:")
-
-# # #             for user, (lat, lon, ip, port) in self.usuarios.items():
-# # #                 distancia = self.distancia((lat, lon))
-# # #                 status = "✅ Dentro da zona de visão" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona de visão"
-# # #                 print(f"   - {user} ({ip}:{port}): {distancia:.2f} metros ({status})")
-
-# # #                 # Se o usuário voltou para dentro da área, buscar mensagens pendentes
-# # #                 if distancia <= DISTANCIA_LIMITE:
-# # #                     print(f"📨 {user} está dentro da zona! Buscando mensagens pendentes...")
-# # #                     self.buscar_mensagens_pendentes()
-
-# # #     def distancia(self, localizacao):
-# # #         """Calcula a distância Euclidiana em metros."""
-# # #         return np.linalg.norm(self.localizacao - np.array(localizacao)) * 111139
-
-# # #     def on_message(self, client, userdata, msg):
-# # #         """Processa mensagens MQTT recebidas no tópico geral e na fila MOM."""
-# # #         try:
-# # #             payload = json.loads(msg.payload.decode())
-
-# # #             if msg.topic.startswith(TOPICO_GERAL):
-# # #                 username = payload.get("username")
-# # #                 latitude = payload.get("latitude")
-# # #                 longitude = payload.get("longitude")
-# # #                 ip = payload.get("ip")
-# # #                 porta_rpc = payload.get("port")
-
-# # #                 if None in (username, latitude, longitude, ip, porta_rpc):
-# # #                     print(f"⚠️ Mensagem MQTT inválida recebida: {payload}")
-# # #                     return
-
-# # #                 if username != self.username:
-# # #                     self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
-# # #                     print(f"✅ {username} foi adicionado à lista de usuários.")
-
-# # #             elif msg.topic.startswith(f"{TOPICO_MENSAGENS}/{self.username}"):
-# # #                 remetente = payload.get("remetente")
-# # #                 mensagem = payload.get("mensagem")
-# # #                 if remetente and mensagem:
-# # #                     print(f"\n📩 (ENTREGUE AGORA) Nova mensagem de {remetente}: {mensagem}")
-# # #                     self.client.publish(f"{TOPICO_MENSAGENS}/{self.username}", "", retain=True)  # Apaga a mensagem após entrega
-
-# # #         except Exception as e:
-# # #             print(f"Erro ao processar mensagem: {e}")
-
-# # # def obter_ip_local():
-# # #     """Obtém o IP local correto da máquina."""
-# # #     try:
-# # #         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# # #         s.connect(("8.8.8.8", 80))
-# # #         ip_local = s.getsockname()[0]
-# # #         s.close()
-# # #         return ip_local
-# # #     except:
-# # #         return "127.0.0.1"
-
-# # # if __name__ == "__main__":
-# # #     username = input("Digite seu nome: ")
-# # #     lat = float(input("Digite sua latitude: "))
-# # #     lon = float(input("Digite sua longitude: "))
-# # #     porta_rpc = input("Digite sua porta RPC: ")
-
-# # #     cliente = ClienteChat(username, lat, lon, porta_rpc)
-
-# # #     while True:
-# # #         cmd = input("\n📨 Digite 'm' para enviar mensagem ou 'l' para atualizar localização: ")
-
-# # #         if cmd == "m":
-# # #             dest = input("Digite o destinatário: ")
-# # #             msg = input("Digite a mensagem: ")
-# # #             cliente.enviar_mensagem(dest, msg)
-
-# # #         elif cmd == "l":
-# # #             lat = float(input("Nova latitude: "))
-# # #             lon = float(input("Nova longitude: "))
-# # #             cliente.localizacao = np.array([lat, lon])
-# # #             cliente.publicar_localizacao()
-# # #             print("📍 Localização atualizada!")
-
-
-# # # # import json
-# # # # import time
-# # # # import threading
-# # # # import numpy as np
-# # # # import paho.mqtt.client as mqtt
-# # # # from xmlrpc.server import SimpleXMLRPCServer
-# # # # import xmlrpc.client
-# # # # import socket
-
-# # # # BROKER = "test.mosquitto.org"
-# # # # DISTANCIA_LIMITE = 200  # metros
-# # # # TOPICO_GERAL = "users/online"  # Tópico onde todos publicam suas informações
-
-# # # # class ClienteChat:
-# # # #     def __init__(self, username, latitude, longitude, porta_rpc):
-# # # #         self.username = username
-# # # #         self.localizacao = np.array([latitude, longitude])
-# # # #         self.usuarios = {}  # {username: (latitude, longitude, ip, porta_rpc)}
-# # # #         self.mensagens_pendentes = {}  # {username: [mensagens]}
-# # # #         self.porta_rpc = int(porta_rpc)
-
-# # # #         # Conectar ao broker MQTT
-# # # #         self.client = mqtt.Client()
-# # # #         self.client.on_message = self.on_message
-# # # #         self.client.connect(BROKER)
-
-# # # #         # Assinar o tópico geral
-# # # #         self.client.subscribe(TOPICO_GERAL)
-# # # #         self.client.loop_start()
-
-# # # #         self.publicar_localizacao()  # Publica as informações para que todos saibam
-# # # #         threading.Thread(target=self.iniciar_servidor_rpc, daemon=True).start()
-# # # #         threading.Thread(target=self.atualizar_vizinhos, daemon=True).start()
-
-# # # #     def iniciar_servidor_rpc(self):
-# # # #         """Inicia um servidor XML-RPC para receber mensagens."""
-# # # #         servidor = SimpleXMLRPCServer(("0.0.0.0", self.porta_rpc), allow_none=True)
-# # # #         servidor.register_function(self.receber_mensagem, "receber_mensagem")
-# # # #         print(f"📡 Servidor XML-RPC iniciado na porta {self.porta_rpc}")
-# # # #         servidor.serve_forever()
-
-# # # #     def receber_mensagem(self, remetente, mensagem):
-# # # #         """Recebe mensagens enviadas via RPC."""
-# # # #         print(f"\n📩 Nova mensagem de {remetente}: {mensagem}")
-# # # #         return True
-
-# # # #     def enviar_mensagem(self, destinatario, mensagem):
-# # # #         """Envia uma mensagem via XML-RPC, armazenando se o usuário estiver offline."""
-# # # #         if destinatario in self.usuarios and self.distancia(self.usuarios[destinatario][:2]) <= DISTANCIA_LIMITE:
-# # # #             ip_destino = self.usuarios[destinatario][2]
-# # # #             porta_destino = self.usuarios[destinatario][3]
-
-# # # #             try:
-# # # #                 proxy = xmlrpc.client.ServerProxy(f"http://{ip_destino}:{porta_destino}/")
-# # # #                 proxy.receber_mensagem(self.username, mensagem)
-# # # #                 print(f"✅ Mensagem enviada para {destinatario}: {mensagem}")
-
-# # # #             except Exception as e:
-# # # #                 print(f"⚠️ Erro ao enviar mensagem para {destinatario}: {e}")
-# # # #                 self.mensagens_pendentes.setdefault(destinatario, []).append(mensagem)
-
-# # # #     def publicar_localizacao(self):
-# # # #         """Publica a localização e IP via MQTT no tópico geral."""
-# # # #         payload = json.dumps({
-# # # #             "username": self.username,
-# # # #             "latitude": self.localizacao[0],
-# # # #             "longitude": self.localizacao[1],
-# # # #             "ip": obter_ip_local(),
-# # # #             "port": self.porta_rpc
-# # # #         })
-# # # #         print(f"📤 Publicando localização no tópico geral: {payload}")
-# # # #         self.client.publish(TOPICO_GERAL, payload)
-
-# # # #     def atualizar_vizinhos(self):
-# # # #         """Atualiza a lista de vizinhos a cada intervalo de tempo."""
-# # # #         while True:
-# # # #             time.sleep(60)
-# # # #             print("\n🔄 Atualizando distâncias dos usuários:")
-# # # #             for user, (lat, lon, ip, port) in self.usuarios.items():
-# # # #                 distancia = self.distancia((lat, lon))
-# # # #                 status = "✅ Dentro da zona de visão" if distancia <= DISTANCIA_LIMITE else "❌ Fora da zona de visão"
-# # # #                 print(f"   - {user} ({ip}:{port}): {distancia:.2f} metros ({status})")
-
-# # # #             for user in list(self.mensagens_pendentes.keys()):
-# # # #                 if user in self.usuarios and self.distancia(self.usuarios[user][:2]) <= DISTANCIA_LIMITE:
-# # # #                     print(f"📨 Entregando mensagens pendentes para {user}: {self.mensagens_pendentes[user]}")
-# # # #                     for msg in self.mensagens_pendentes[user]:
-# # # #                         self.enviar_mensagem(user, msg)
-# # # #                     del self.mensagens_pendentes[user]
-
-# # # #     def distancia(self, localizacao):
-# # # #         """Calcula a distância Euclidiana em metros."""
-# # # #         return np.linalg.norm(self.localizacao - np.array(localizacao)) * 111139
-
-# # # #     def on_message(self, client, userdata, msg):
-# # # #         """Processa mensagens MQTT recebidas no tópico geral."""
-# # # #         try:
-# # # #             payload = json.loads(msg.payload.decode())
-
-# # # #             username = payload.get("username")
-# # # #             latitude = payload.get("latitude")
-# # # #             longitude = payload.get("longitude")
-# # # #             ip = payload.get("ip")
-# # # #             porta_rpc = payload.get("port")
-
-# # # #             if None in (username, latitude, longitude, ip, porta_rpc):
-# # # #                 print(f"⚠️ Mensagem MQTT inválida recebida: {payload}")
-# # # #                 return
-
-# # # #             if username != self.username:
-# # # #                 if username not in self.usuarios:
-# # # #                     print(f"👥 Novo usuário detectado: {username}. Enviando minhas informações para ele!")
-# # # #                     self.publicar_localizacao()  # Manda as infos para o novo usuário
-
-# # # #                 self.usuarios[username] = (latitude, longitude, ip, porta_rpc)
-# # # #                 print(f"✅ {username} foi adicionado à lista de usuários.")
-
-# # # #         except Exception as e:
-# # # #             print(f"Erro ao processar mensagem: {e}")
-
-# # # # def obter_ip_local():
-# # # #     """Obtém o IP local correto da máquina."""
-# # # #     try:
-# # # #         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# # # #         s.connect(("8.8.8.8", 80))
-# # # #         ip_local = s.getsockname()[0]
-# # # #         s.close()
-# # # #         return ip_local
-# # # #     except:
-# # # #         return "127.0.0.1"
-
-# # # # if __name__ == "__main__":
-# # # #     username = input("Digite seu nome: ")
-# # # #     lat = float(input("Digite sua latitude: "))
-# # # #     lon = float(input("Digite sua longitude: "))
-# # # #     porta_rpc = input("Digite sua porta RPC: ")
-
-# # # #     cliente = ClienteChat(username, lat, lon, porta_rpc)
-
-# # # #     while True:
-# # # #         cmd = input("\n📨 Digite 'm' para enviar mensagem ou 'l' para atualizar localização: ")
-
-# # # #         if cmd == "m":
-# # # #             dest = input("Digite o destinatário: ")
-# # # #             msg = input("Digite a mensagem: ")
-# # # #             cliente.enviar_mensagem(dest, msg)
-
-# # # #         elif cmd == "l":
-# # # #             lat = float(input("Nova latitude: "))
-# # # #             lon = float(input("Nova longitude: "))
-# # # #             cliente.localizacao = np.array([lat, lon])
-# # # #             cliente.publicar_localizacao()
-# # # #             print("📍 Localização atualizada!")
+    root = tk.Tk()
+    app = ClienteChat(root)
+    root.mainloop()
