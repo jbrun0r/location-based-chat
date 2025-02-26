@@ -19,7 +19,7 @@ TOPICO_RECEBE = "recebe"
 class ClienteChat:
     def __init__(self, root):
         self.root = root
-        self.root.title("Chat de Proximidade")
+        self.root.title("Location Based Chat")
         self.root.geometry("600x800")
 
         self.username = tk.StringVar()
